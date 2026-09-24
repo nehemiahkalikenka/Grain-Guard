@@ -1,0 +1,4 @@
+# Preserve LF line endings for all source code files
+*.cpp text eol=lf
+*.h text eol=lf
+*.ini text eol=lf
