@@ -4,24 +4,27 @@
 #include <WiFi.h>
 #include <AsyncTCP.h>
 #include <ESPAsyncWebServer.h>
-#include <ESPAsyncWiFiManager.h>
-#include <ESPmDNS.h>
+#include <DNSServer.h>
 
-// Global references accessible across modules
+// ─── Configuration Parameters ────────────────────────────────────────────────
+#define DNS_PORT           53
+#define AP_SSID            "GrainGuard-AP"
+#define AP_PASSWORD        "12345678"          // Minimum 8 chars
+#define WS_BROADCAST_INTERVAL 1000UL            // Broadcast sensor data every 1s
+
+// ─── Exposed Objects & Functions ─────────────────────────────────────────────
 extern AsyncWebServer server;
 extern AsyncWebSocket ws;
+extern DNSServer      dnsServer;
 
-// Core Wi-Fi and Web Server interface functions
+// Core Interface Functions
 void setupWiFi();
-void setupWebServer();
-void resetWiFiCredentials();
+void loopCaptivePortal();                     // Call continuously inside loop()
+void broadcastSensorData();                   // Call to push live sensor metrics over WebSocket
+void requestWiFiReset();                      // Deferred reset flag
 bool isWiFiConnected();
-void broadcastSensorData(); // Call this from loop() every second
-void requestWiFiReset();
-
-// Endpoint Handlers
-void handleResetWiFi(AsyncWebServerRequest* request);
-void handleSDLog(AsyncWebServerRequest* request);
+// System log function declared in main.cpp
 void logAlert(const char* level, const char* msg);
 
+// Embedded Web Dashboard HTML (Stored in Flash Memory)
 extern const char INDEX_HTML[] PROGMEM;

@@ -110,7 +110,7 @@ setupWiFi();
 // In setup() after setupWiFi():
 Serial.print("Current IP: ");
 Serial.println(WiFi.localIP());
-setupWebServer();
+
 
 bootMillis = millis();
 
@@ -127,6 +127,7 @@ if (!gsmAvailable) Serial.println(F("[GSM] Unavailable — SMS disabled."));
 // ============= LOOP =============
 void loop() {
     buttonListener();
+    loopCaptivePortal();
     menu.poll(100);
     updateBuzzer();
 

@@ -1,195 +1,161 @@
 #include "WIFIdriver.h"
-#include "sensor.h" // Thresholds: MOISTURE_CRITICAL, TEMP_THRESHOLD, HUMIDITY_THRESHOLD, etc.
-#include <SD.h>
 
-// ─── External Globals Defined elsewhere ────────────────────────────────────
+// ─── Extern Sensor Values (Declared in main.cpp) ───────────────────────────
 extern float currentTemp;
 extern float currentHumidity;
 extern int   currentMoisturePercent;
-extern int   currentMoistureRaw;
-extern bool  motionDetected;
-extern int   totalAlerts;
-extern bool  sdAvailable;
-extern char  wifiIPStr[16];
 
-// ─── Async Server & WebSocket Instances ────────────────────────────────────
+// ─── Network Instances ──────────────────────────────────────────────────────
+DNSServer      dnsServer;
 AsyncWebServer server(80);
 AsyncWebSocket ws("/ws");
-DNSServer dns;
 
-static bool restartPending = false; // Deferred reset flag
+// Access Point Network IP Settings
+const IPAddress apIP(192, 168, 4, 1);
+const IPAddress netMask(255, 255, 255, 0);
 
-// ─── WebSocket events ──────────────────────────────────────────────────────
-void onWsEvent(AsyncWebSocket* srv, AsyncWebSocketClient* client,
-               AwsEventType type, void* arg, uint8_t* data, size_t len) {
-  if (type == WS_EVT_CONNECT) {
-    Serial.printf("[WS] Client #%u connected from %s\n", client->id(), client->remoteIP().toString().c_str());
-  } else if (type == WS_EVT_DISCONNECT) {
-    Serial.printf("[WS] Client #%u disconnected\n", client->id());
-  }
-}
+static uint32_t lastWsBroadcast = 0;
+static bool     restartPending   = false;
 
-// ─── JSON Telemetry Generation ─────────────────────────────────────────────
-static String buildJson() {
-  const char* level =
-    (currentMoisturePercent > MOISTURE_CRITICAL || currentTemp > TEMP_THRESHOLD ||
-     currentHumidity > HUMIDITY_THRESHOLD)                            ? "DANGER"  :
-    (currentMoisturePercent > MOISTURE_WARNING)                       ? "WARNING" : "SAFE";
-
-  char json[320];
-  snprintf(json, sizeof(json),
-    "{\"temp\":%.1f,\"humidity\":%.1f,\"moisture\":%d,\"moistureRaw\":%d,"
-    "\"motion\":%s,\"danger\":\"%s\",\"alerts\":%d,\"ip\":\"%s\"}",
-    currentTemp, currentHumidity, currentMoisturePercent, currentMoistureRaw,
-    motionDetected ? "true" : "false", level, totalAlerts, wifiIPStr);
-  return String(json);
-}
-
-// ─── Called from loop() periodically ───────────────────────────────────────
-void broadcastSensorData() {
-  if (restartPending) {
-    resetWiFiCredentials(); // Performed outside ISR / HTTP context
-    return;
-  }
-  if (!isWiFiConnected() || ws.count() == 0) return;
-  ws.textAll(buildJson());
-}
-
-// ─── Dashboard HTML (Stored in Flash Memory) ──────────────────────────────
+// ─── Embedded HTML Dashboard ────────────────────────────────────────────────
 const char INDEX_HTML[] PROGMEM = R"rawliteral(
-<!DOCTYPE html><html><head>
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>GrainGuard Dashboard</title>
-<style>
-body{font-family:Arial,sans-serif;background:#121212;color:#fff;padding:16px;margin:0}
-.card{background:#1e1e1e;padding:16px;border-radius:8px;margin-bottom:10px}
-.big{font-size:2em;font-weight:bold}
-.SAFE{color:#4caf50}.WARNING{color:#ffb300}.DANGER{color:#f44336}
-button{background:#008CBA;color:#fff;border:0;padding:10px 14px;border-radius:4px;margin-right:6px;cursor:pointer}
-button:hover{background:#007399}
-</style></head><body>
-<h2>GrainGuard Live Dashboard</h2>
-<div class="card">Status: <span id="danger" class="big">--</span></div>
-<div class="card">Temperature: <span id="temp" class="big">--</span></div>
-<div class="card">Humidity: <span id="humidity" class="big">--</span></div>
-<div class="card">Grain Moisture: <span id="moisture" class="big">--</span></div>
-<div class="card">Motion: <span id="motion">--</span> &nbsp; Alerts: <span id="alerts">--</span></div>
-<div class="card">
-  <button onclick="location.href='/api/sdlog'">Download Log</button>
-  <button onclick="resetWiFi()">Reset WiFi</button>
-</div>
-<script>
-var ws;
-function connect(){
-  ws = new WebSocket('ws://'+location.hostname+'/ws');
-  ws.onmessage = function(e){
-    var d = JSON.parse(e.data);
-    document.getElementById('temp').innerText = d.temp + ' °C';
-    document.getElementById('humidity').innerText = d.humidity + ' %';
-    document.getElementById('moisture').innerText = d.moisture + ' %';
-    document.getElementById('motion').innerText = d.motion ? 'DETECTED' : 'Clear';
-    document.getElementById('alerts').innerText = d.alerts;
-    var s = document.getElementById('danger');
-    s.innerText = d.danger; s.className = 'big ' + d.danger;
-  };
-  ws.onclose = function(){ setTimeout(connect, 3000); };
-}
-connect();
-function resetWiFi(){
-  if(confirm('Erase stored WiFi settings and restart captive portal?'))
-    fetch('/api/resetwifi', {method:'POST'}).catch(function(){});
-}
-</script></body></html>
+<!DOCTYPE html>
+<html>
+<head>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GrainGuard Dashboard</title>
+  <style>
+    body { font-family: Arial, sans-serif; text-align: center; background: #f4f7f6; margin: 0; padding: 20px; }
+    .card { background: white; padding: 20px; margin: 15px auto; max-width: 400px; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+    h1 { color: #2c3e50; font-size: 24px; }
+    .value { font-size: 28px; font-weight: bold; color: #27ae60; margin: 10px 0; }
+    .label { color: #7f8c8d; font-size: 14px; text-transform: uppercase; }
+  </style>
+</head>
+<body>
+  <h1>GrainGuard Monitor</h1>
+  <div class="card"><div class="label">Grain Moisture</div><div id="moisture" class="value">-- %</div></div>
+  <div class="card"><div class="label">Temperature</div><div id="temp" class="value">-- &deg;C</div></div>
+  <div class="card"><div class="label">Humidity</div><div id="hum" class="value">-- %</div></div>
+
+  <script>
+    var gateway = `ws://${window.location.hostname}/ws`;
+    var websocket;
+    function initWebSocket() {
+      websocket = new WebSocket(gateway);
+      websocket.onmessage = onMessage;
+    }
+    function onMessage(event) {
+      var data = JSON.parse(event.data);
+      if(data.temp !== undefined) document.getElementById('temp').innerHTML = data.temp.toFixed(1) + ' &deg;C';
+      if(data.hum !== undefined) document.getElementById('hum').innerHTML = data.hum.toFixed(1) + ' %';
+      if(data.moisture !== undefined) document.getElementById('moisture').innerHTML = data.moisture + ' %';
+    }
+    window.addEventListener('load', initWebSocket);
+  </script>
+</body>
+</html>
 )rawliteral";
 
-// ─── setupWiFi Implementation ──────────────────────────────────────────────
-void setupWiFi() {
-  AsyncWiFiManager wifiManager(&server, &dns);
-  
-  // Set timeout for AP setup portal before continuing (in seconds)
-  wifiManager.setConfigPortalTimeout(180);
-
-  Serial.println(F("[WiFi] Connecting or launching captive portal..."));
-  if (!wifiManager.autoConnect("GrainGuard-Setup")) {
-    Serial.println(F("[WiFi] Failed to connect / timed out. Running offline..."));
-    snprintf(wifiIPStr, sizeof(wifiIPStr), "Offline");
-    return;
+// ─── WiFi Connectivity Check ────────────────────────────────────────────────
+bool isWiFiConnected() {
+  // Checks if running in STA mode and connected to an AP,
+  // or if running in SoftAP mode and has at least 1 client connected.
+  if (WiFi.getMode() & WIFI_MODE_STA) {
+    return (WiFi.status() == WL_CONNECTED);
   }
-
-  // Record allocated local IP address
-  snprintf(wifiIPStr, sizeof(wifiIPStr), "%s", WiFi.localIP().toString().c_str());
-  Serial.printf("[WiFi] Connected! IP Address: %s\n", wifiIPStr);
+  return (WiFi.softAPgetStationNum() > 0);
 }
 
-// ─── setupWebServer Implementation ────────────────────────────────────────
-void setupWebServer() {
-  if (!isWiFiConnected()) {
-    Serial.println(F("[WebServer] Skipped — WiFi non-functional."));
-    return;
+// ─── WebSocket Event Handling ───────────────────────────────────────────────
+void onEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventType type, void *arg, uint8_t *data, size_t len) {
+  switch (type) {
+    case WS_EVT_CONNECT:
+      Serial.printf("[WS] Client #%u connected from %s\n", client->id(), client->remoteIP().toString().c_str());
+      broadcastSensorData();
+      break;
+    case WS_EVT_DISCONNECT:
+      Serial.printf("[WS] Client #%u disconnected\n", client->id());
+      break;
+    case WS_EVT_DATA:
+    case WS_EVT_PONG:
+    case WS_EVT_ERROR:
+      break;
   }
+}
 
-  // Setup mDNS Responder
-  if (MDNS.begin("grainguard")) {
-    MDNS.addService("http", "tcp", 80);
-    Serial.println(F("[mDNS] Responder active at http://grainguard.local"));
-  }
+// ─── Setup Function ────────────────────────────────────────────────────────
+void setupWiFi() {
+  // 1. Configure Access Point (SoftAP)
+  WiFi.mode(WIFI_AP);
+  WiFi.softAPConfig(apIP, apIP, netMask);
+  WiFi.softAP(AP_SSID, AP_PASSWORD);
 
-  // Attach WebSocket handler to Web Server
-  ws.onEvent(onWsEvent);
+  Serial.println("[WiFi] Access Point started: " AP_SSID);
+  Serial.print("[WiFi] IP Address: ");
+  Serial.println(WiFi.softAPIP());
+
+  // 2. Start Captive Portal DNS Server
+  dnsServer.start(DNS_PORT, "*", apIP);
+
+  // 3. Register WebSocket Endpoint
+  ws.onEvent(onEvent);
   server.addHandler(&ws);
 
-  // Serve Main Dashboard
-  server.on("/", HTTP_GET, [](AsyncWebServerRequest* req) {
-    req->send(200, "text/html", INDEX_HTML);
+  // 4. Primary Root Route (Using send instead of deprecated send_P)
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
+    request->send(200, "text/html", INDEX_HTML);
   });
 
-  // REST API Route for direct polling
-  server.on("/api/data", HTTP_GET, [](AsyncWebServerRequest* req) {
-    req->send(200, "application/json", buildJson());
+  // 5. Mobile OS Captive Portal Detection Endpoints
+  server.on("/generate_204", HTTP_GET, [](AsyncWebServerRequest *request) { request->send(200, "text/html", INDEX_HTML); });
+  server.on("/hotspot-detect.html", HTTP_GET, [](AsyncWebServerRequest *request) { request->send(200, "text/html", INDEX_HTML); });
+  server.on("/canonical.html", HTTP_GET, [](AsyncWebServerRequest *request) { request->send(200, "text/html", INDEX_HTML); });
+  server.on("/connecttest.txt", HTTP_GET, [](AsyncWebServerRequest *request) { request->send(200, "text/html", INDEX_HTML); });
+
+  // 6. Catch-All Handler for Captive Redirection
+  server.onNotFound([](AsyncWebServerRequest *request) {
+    if (request->host() != "192.168.4.1") {
+      request->redirect("http://192.168.4.1/");
+    } else {
+      request->send(404, "text/plain", "Not Found");
+    }
   });
 
-  // SD Card Download Route
-  server.on("/api/sdlog", HTTP_GET, handleSDLog);
-
-  // WiFi Reset trigger endpoint
-  server.on("/api/resetwifi", HTTP_POST, handleResetWiFi);
-
-  // Start Server
+  // 7. Start Async WebServer
   server.begin();
-  Serial.printf("[WebServer] Dashboard active at http://%s (or http://grainguard.local)\n", wifiIPStr);
+  Serial.println("[WebServer] Dashboard and Captive Portal active at http://192.168.4.1");
 }
 
-// ─── Endpoint & Utility Implementations ────────────────────────────────────
+// ─── Loop Processing ────────────────────────────────────────────────────────
+void loopCaptivePortal() {
+  dnsServer.processNextRequest();
+  ws.cleanupClients();
 
-void handleResetWiFi(AsyncWebServerRequest* req) {
-  req->send(200, "application/json", "{\"ok\":true}");
-  restartPending = true; // Request actual erase & reboot in loop context
-}
-
-void resetWiFiCredentials() {
-  Serial.println(F("[WiFi] Clearing saved WiFi settings and restarting..."));
-  AsyncWiFiManager wifiManager(&server, &dns);
-  wifiManager.resetSettings();
-  delay(500);
-  ESP.restart();
-}
-
-void handleSDLog(AsyncWebServerRequest* req) {
-  if (!sdAvailable) {
-    req->send(503, "text/plain", "SD card not available");
-    return;
+  if (restartPending) {
+    delay(500);
+    ESP.restart();
   }
-  if (!SD.exists("/datalog.txt")) {
-    req->send(404, "text/plain", "Log file not found");
-    return;
+}
+
+// ─── Broadcast Sensor Data Over WebSocket ──────────────────────────────────
+void broadcastSensorData() {
+  if (millis() - lastWsBroadcast >= WS_BROADCAST_INTERVAL) {
+    lastWsBroadcast = millis();
+
+    if (ws.count() > 0) {
+      char jsonBuf[128];
+      snprintf(jsonBuf, sizeof(jsonBuf), 
+               "{\"temp\":%.1f,\"hum\":%.1f,\"moisture\":%d}", 
+               currentTemp, currentHumidity, currentMoisturePercent);
+      
+      ws.textAll(jsonBuf);
+    }
   }
-  req->send(SD, "/datalog.txt", "text/plain", true); // Send file as download attachment
 }
 
-bool isWiFiConnected() {
-  return WiFi.status() == WL_CONNECTED;
-}
-
+// ─── Deferred Reset Request Handler ─────────────────────────────────────────
 void requestWiFiReset() {
-    restartPending = true;
+  Serial.println("[WiFi] System restart requested via menu...");
+  restartPending = true;
 }

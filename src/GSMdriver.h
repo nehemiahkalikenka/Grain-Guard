@@ -9,7 +9,7 @@
 #define GSM_PIN_TX      17       // ESP32 GPIO17 → SIM800L RX  (via 10kΩ/20kΩ divider)
 
 // ─── Phone number ─────────────────────────────────────────────────────────
-#define GSM_PHONE_NUMBER  "+260770547896"   // Target recipient number
+#define GSM_PHONE_NUMBER  "+260952421858"   // Target recipient number
 
 // ─── Timeouts ─────────────────────────────────────────────────────────────
 #define GSM_TIMEOUT_SHORT    3000UL
