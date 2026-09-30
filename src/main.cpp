@@ -130,9 +130,13 @@ void loop() {
     menu.poll(100);
     updateBuzzer();
 
-    if (isWiFiConnected()) {
-    server.handleClient();   // only call when actually connected
-}
+    // Broadcast sensor data to WebSocket clients every second
+    static unsigned long lastBroadcast = 0;
+    if (millis() - lastBroadcast >= 1000) {
+        lastBroadcast = millis();
+        broadcastSensorData();   // ← add this
+        ws.cleanupClients();     // ← add this — frees disconnected slots
+    }
     
     readSensors();
     checkAlerts();
@@ -353,81 +357,6 @@ void logAlert(const char* level, const char* msg) {
     char line[128];
     snprintf(line, sizeof(line), "[%s] %s %s", level, ts.c_str(), msg);
     logToSD(line);
-}
-
-// ============= WEB HANDLERS =============
-void handleRoot() {
-    server.send_P(200, "text/html", INDEX_HTML);
-}
-
-void handleAPI() {
-    // Build JSON in a fixed stack buffer — no heap fragmentation
-    char json[1024];
-    int pos = 0;
-
-    // Core sensor values
-    pos += snprintf(json + pos, sizeof(json) - pos,
-        "{\"temp\":%.1f,\"humidity\":%.1f,\"moisture\":%d,"
-        "\"moisture_raw\":%d,\"motion\":%s,"
-        "\"rssi\":%d,\"uptime_ms\":%lu,\"total_alerts\":%d,"
-        "\"timestamp\":\"%s\",\"alerts\":[",
-        currentTemp, currentHumidity, currentMoisturePercent,
-        currentMoistureRaw, motionDetected ? "true" : "false",
-        WiFi.RSSI(), millis() - bootMillis, totalAlerts,
-        getFormattedDateTime().c_str());
-
-    // Alert array (last 20)
-    int start = (alertCount > 20) ? alertCount - 20 : 0;
-    for (int i = start; i < alertCount && pos < (int)sizeof(json) - 80; i++) {
-        if (i > start) json[pos++] = ',';
-        // Escape any quotes in msg
-        char escapedMsg[90];
-        int ei = 0;
-        for (int j = 0; alertLog[i].msg[j] && ei < (int)sizeof(escapedMsg) - 2; j++) {
-            if (alertLog[i].msg[j] == '"') escapedMsg[ei++] = '\\';
-            escapedMsg[ei++] = alertLog[i].msg[j];
-        }
-        escapedMsg[ei] = '\0';
-
-        pos += snprintf(json + pos, sizeof(json) - pos,
-            "{\"ts\":\"%s\",\"level\":\"%s\",\"msg\":\"%s\"}",
-            alertLog[i].ts, alertLog[i].level, escapedMsg);
-    }
-
-    // Close
-    if (pos < (int)sizeof(json) - 3) {
-        json[pos++] = ']';
-        json[pos++] = '}';
-        json[pos]   = '\0';
-    }
-
-    server.send(200, "application/json", json);
-}
-
-void handleClearAlerts() {
-    alertCount  = 0;
-    totalAlerts = 0;
-    logAlert("INFO", "Alert log cleared");
-    server.send(200, "application/json", "{\"ok\":true}");
-}
-
-void handleSDLog() {
-    if (!sdAvailable) {
-        server.send(503, "text/plain", "SD card not available");
-        return;
-    }
-    File f = SD.open("/datalog.txt", FILE_READ);
-    if (!f) {
-        server.send(404, "text/plain", "Log file not found");
-        return;
-    }
-    // Send as a downloadable text file with today's date in the filename
-    String filename = "grainguard_" + getFormattedDateTime().substring(0, 10) + ".txt";
-    filename.replace("/", "-");   // MM-DD-YYYY safe for filenames
-    server.sendHeader("Content-Disposition", "attachment; filename=\"" + filename + "\"");
-    server.sendHeader("Content-Length", String(f.size()));
-    server.streamFile(f, "text/plain");
-    f.close();
 }
 
 // ============= UTILITIES =============
