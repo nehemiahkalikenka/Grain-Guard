@@ -9,12 +9,12 @@
 #define GSM_PIN_TX      17       // ESP32 GPIO17 → SIM800L RX  (via 10kΩ/20kΩ divider)
 
 // ─── Phone number ─────────────────────────────────────────────────────────
-#define GSM_PHONE_NUMBER  "+260770547896"   // edit to your number
+#define GSM_PHONE_NUMBER  "+260952421858"   // Target recipient number
 
 // ─── Timeouts ─────────────────────────────────────────────────────────────
 #define GSM_TIMEOUT_SHORT    3000UL
-#define GSM_TIMEOUT_NET     15000UL
-#define GSM_TIMEOUT_SMS      5000UL
+#define GSM_TIMEOUT_NET     30000UL   // Increased to 30s to allow cold-boot tower search
+#define GSM_TIMEOUT_SMS     10000UL   // Increased to 10s for network SMS submit confirmation
 
 // ─── SMS commands ─────────────────────────────────────────────────────────
 enum class GSMCommand {
@@ -36,7 +36,7 @@ struct IncomingSMS {
 // ─── Driver ───────────────────────────────────────────────────────────────
 class SIM800LDriver {
 public:
-  // Start Serial2, handshake, register on network, send boot SMS.
+  // Start Serial2, handshake, check SIM, register on network, send boot SMS.
   bool init();
 
   // Send SMS to GSM_PHONE_NUMBER.
@@ -56,14 +56,14 @@ public:
   bool isAlive();
 
 private:
-  // Send raw AT command with \r terminator (matches what works on Mega).
+  // Send raw AT command with \r terminator
   void   _sendAT(const char* cmd);
 
   // Read serial response into internal buffer until expected string
   // found or timeout. Returns true on match.
   bool   _waitFor(const char* expected, uint32_t timeout);
 
-  // Read all available serial data into a String (same approach as Mega).
+  // Read all available serial data into a String.
   String _readResponse(uint32_t timeout = 1000);
 
   // Drain the RX buffer.
@@ -72,3 +72,6 @@ private:
   // Parse raw SMS text into a GSMCommand.
   void   _parseCommand(IncomingSMS& sms);
 };
+
+// Global instance declaration accessible across project files
+extern SIM800LDriver gsm;

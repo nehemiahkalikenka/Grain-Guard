@@ -2,31 +2,29 @@
 
 #include <Arduino.h>
 #include <WiFi.h>
-#include <WebServer.h>
-#include <WiFiManager.h>
+#include <AsyncTCP.h>
+#include <ESPAsyncWebServer.h>
+#include <DNSServer.h>
 
-// ─── No hardcoded credentials — WiFiManager handles storage in NVS ─────────
+// ─── Configuration Parameters ────────────────────────────────────────────────
+#define DNS_PORT           53
+#define AP_SSID            "GrainGuard-AP"
+#define AP_PASSWORD        "12345678"          // Minimum 8 chars
+#define WS_BROADCAST_INTERVAL 1000UL            // Broadcast sensor data every 1s
 
-extern WebServer server;
+// ─── Exposed Objects & Functions ─────────────────────────────────────────────
+extern AsyncWebServer server;
+extern AsyncWebSocket ws;
+extern DNSServer      dnsServer;
 
-// ─── Core setup ────────────────────────────────────────────────────────────
+// Core Interface Functions
 void setupWiFi();
-void setupWebServer();
-
-// ─── Reset stored credentials and relaunch config portal ──────────────────
-// Call from LCD menu "Reset WiFi" or web dashboard button
-void resetWiFiCredentials();
-
-// ─── Returns true if ESP32 is connected to a network ──────────────────────
+void loopCaptivePortal();                     // Call continuously inside loop()
+void broadcastSensorData();                   // Call to push live sensor metrics over WebSocket
+void requestWiFiReset();                      // Deferred reset flag
 bool isWiFiConnected();
-
-// ─── Web handlers ─────────────────────────────────────────────────────────
-void handleRoot();
-void handleAPI();
-void handleClearAlerts();
-void handleSDLog();
-void handleResetWiFi();     // Web dashboard trigger for reset
-
+// System log function declared in main.cpp
 void logAlert(const char* level, const char* msg);
 
+// Embedded Web Dashboard HTML (Stored in Flash Memory)
 extern const char INDEX_HTML[] PROGMEM;

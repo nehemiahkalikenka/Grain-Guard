@@ -22,6 +22,7 @@ ButtonAdapter upButtonA   (&menu, &upButton,    UP, 0, 0);
 ButtonAdapter downButtonA (&menu, &downButton,  DOWN, 0, 0);
 ButtonAdapter enterButtonA(&menu, &enterButton, ENTER);
 
+// Forward declarations for MenuScreens
 extern MenuScreen* welcomeScreen;
 extern MenuScreen* optionsScreen;
 extern MenuScreen* statusScreen;
@@ -29,33 +30,28 @@ extern MenuScreen* settingsScreen;
 extern MenuScreen* aboutScreen;
 extern MenuScreen* commModeScreen;
 
+// ─── Comm Mode Lambdas ─────────────────────────────────────────────────────
 auto setWiFiOnly = []() {
   commPrefs.save(CommMode::WIFI_ONLY);
-  Serial.printf("[LCD] Comm mode set: %s\n",
-                commModeLabel(CommMode::WIFI_ONLY));
+  Serial.printf("[LCD] Comm mode set: %s\n", commModeLabel(CommMode::WIFI_ONLY));
 };
 
-// GSM Only
 auto setGSMOnly = []() {
   commPrefs.save(CommMode::GSM_ONLY);
-  Serial.printf("[LCD] Comm mode set: %s\n",
-                commModeLabel(CommMode::GSM_ONLY));
+  Serial.printf("[LCD] Comm mode set: %s\n", commModeLabel(CommMode::GSM_ONLY));
 };
 
-// Both
 auto setBoth = []() {
   commPrefs.save(CommMode::BOTH);
-  Serial.printf("[LCD] Comm mode set: %s\n",
-                commModeLabel(CommMode::BOTH));
+  Serial.printf("[LCD] Comm mode set: %s\n", commModeLabel(CommMode::BOTH));
 };
 
-// Auto
 auto setAuto = []() {
   commPrefs.save(CommMode::AUTO);
-  Serial.printf("[LCD] Comm mode set: %s\n",
-                commModeLabel(CommMode::AUTO));
+  Serial.printf("[LCD] Comm mode set: %s\n", commModeLabel(CommMode::AUTO));
 };
 
+// ─── Menu Screens ──────────────────────────────────────────────────────────
 MENU_SCREEN(statusScreen, statusItems,
     ITEM_VALUE("Temp",     currentTemp,            "%.1f C"),
     ITEM_VALUE("Humidity", currentHumidity,        "%.1f %%"),
@@ -69,35 +65,37 @@ MENU_SCREEN(aboutScreen, aboutItems,
     ITEM_SUBMENU("Back", optionsScreen)
 );
 
-MENU_SCREEN(optionsScreen, optionItems,
-    ITEM_BASIC("OPTIONS"),
-    ITEM_SUBMENU("Status", statusScreen),
-    ITEM_SUBMENU("Comm Mode", commModeScreen),
-    ITEM_BASIC("Mode"),
-    ITEM_SUBMENU("Settings", settingsScreen)
+MENU_SCREEN(commModeScreen, commModeItems,
+    ITEM_BASIC("COMM MODE"),
+    ITEM_COMMAND("WiFi Only",  setWiFiOnly),
+    ITEM_COMMAND("GSM Only",   setGSMOnly),
+    ITEM_COMMAND("WiFi + GSM", setBoth),
+    ITEM_COMMAND("Auto",       setAuto),
+    ITEM_SUBMENU("Back", optionsScreen)
 );
 
 MENU_SCREEN(settingsScreen, settingsItems,
     ITEM_BASIC("SETTINGS"),
-    ITEM_COMMAND("Reset WiFi", []() { resetWiFiCredentials(); }),
+    ITEM_COMMAND("Reset WiFi", []() { requestWiFiReset(); }),
     ITEM_SUBMENU("Back", optionsScreen)
 );
 
+MENU_SCREEN(optionsScreen, optionItems,
+    ITEM_BASIC("OPTIONS"),
+    ITEM_SUBMENU("Status", statusScreen),
+    ITEM_SUBMENU("Comm Mode", commModeScreen),
+    ITEM_SUBMENU("Settings", settingsScreen),
+    ITEM_SUBMENU("Back", welcomeScreen)
+);
+
 MENU_SCREEN(welcomeScreen, welcomeItems,
-    ITEM_BASIC("WELCOME GRAIN-GUARD"),
+    ITEM_BASIC("WELCOME GRAIN-"),
+    ITEM_BASIC("GUARD"),
     ITEM_SUBMENU("Options", optionsScreen),
     ITEM_SUBMENU("About",   aboutScreen)
 );
 
-MENU_SCREEN(commModeScreen, commModeItems,
-  ITEM_BASIC("COMM MODE"),
-  ITEM_COMMAND("WiFi Only",  setWiFiOnly),
-  ITEM_COMMAND("GSM Only",   setGSMOnly),
-  ITEM_COMMAND("WiFi + GSM", setBoth),
-  ITEM_COMMAND("Auto",       setAuto),
-  ITEM_SUBMENU("Back", optionsScreen)
-);
-
+// ─── Initialization Functions ──────────────────────────────────────────────
 void lcdMenuSetup() {
     lcd.init();
     lcd.backlight();
