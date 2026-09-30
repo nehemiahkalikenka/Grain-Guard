@@ -1,9 +1,11 @@
 #include "WIFIdriver.h"
+#include "sdcard.h"
 
 // ─── Extern Sensor Values (Declared in main.cpp) ───────────────────────────
 extern float currentTemp;
 extern float currentHumidity;
 extern int   currentMoisturePercent;
+extern bool  motionDetected;
 
 // ─── Network Instances ──────────────────────────────────────────────────────
 DNSServer      dnsServer;
@@ -30,27 +32,79 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
     h1 { color: #2c3e50; font-size: 24px; }
     .value { font-size: 28px; font-weight: bold; color: #27ae60; margin: 10px 0; }
     .label { color: #7f8c8d; font-size: 14px; text-transform: uppercase; }
+    
+    /* Motion Alert Banner */
+    #motion-alert {
+      display: none;
+      background-color: #e74c3c;
+      color: white;
+      padding: 15px;
+      border-radius: 8px;
+      max-width: 400px;
+      margin: 10px auto;
+      font-weight: bold;
+      animation: blink 1s infinite alternate;
+    }
+    @keyframes blink { from { opacity: 1; } to { opacity: 0.6; } }
+
+    /* Download Button */
+    .btn {
+      display: inline-block;
+      background-color: #2980b9;
+      color: white;
+      padding: 12px 24px;
+      text-decoration: none;
+      border-radius: 6px;
+      font-size: 16px;
+      font-weight: bold;
+      margin-top: 15px;
+      border: none;
+      cursor: pointer;
+    }
+    .btn:hover { background-color: #3498db; }
   </style>
 </head>
 <body>
   <h1>GrainGuard Monitor</h1>
+
+  <!-- Motion Alert Banner -->
+  <div id="motion-alert">⚠️ MOTION DETECTED NEAR GRAIN STORE!</div>
+
   <div class="card"><div class="label">Grain Moisture</div><div id="moisture" class="value">-- %</div></div>
   <div class="card"><div class="label">Temperature</div><div id="temp" class="value">-- &deg;C</div></div>
   <div class="card"><div class="label">Humidity</div><div id="hum" class="value">-- %</div></div>
 
+  <!-- Download Data Button -->
+  <div class="card">
+    <div class="label">Data Logging</div>
+    <a href="/download-logs" download="grainguard_logs.csv" class="btn">📥 Download Log Data (CSV)</a>
+  </div>
+
   <script>
     var gateway = `ws://${window.location.hostname}/ws`;
     var websocket;
+    
     function initWebSocket() {
       websocket = new WebSocket(gateway);
       websocket.onmessage = onMessage;
+      websocket.onclose = function() { setTimeout(initWebSocket, 2000); };
     }
+
     function onMessage(event) {
       var data = JSON.parse(event.data);
       if(data.temp !== undefined) document.getElementById('temp').innerHTML = data.temp.toFixed(1) + ' &deg;C';
       if(data.hum !== undefined) document.getElementById('hum').innerHTML = data.hum.toFixed(1) + ' %';
       if(data.moisture !== undefined) document.getElementById('moisture').innerHTML = data.moisture + ' %';
+      
+      // Handle Motion Alert
+      var alertBox = document.getElementById('motion-alert');
+      if(data.motion === true) {
+        alertBox.style.display = 'block';
+      } else {
+        alertBox.style.display = 'none';
+      }
     }
+
     window.addEventListener('load', initWebSocket);
   </script>
 </body>
@@ -102,6 +156,14 @@ void setupWiFi() {
   ws.onEvent(onEvent);
   server.addHandler(&ws);
 
+  server.on("/download-logs", HTTP_GET, [](AsyncWebServerRequest *request) {
+    if (SD.exists("/logs.csv")) {
+      request->send(SD, "/logs.csv", "text/csv", true); // 'true' forces download prompt
+    } else {
+      request->send(404, "text/plain", "Log file not found on SD card.");
+    }
+  });
+
   // 4. Primary Root Route (Using send instead of deprecated send_P)
   server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
     request->send(200, "text/html", INDEX_HTML);
@@ -144,10 +206,13 @@ void broadcastSensorData() {
     lastWsBroadcast = millis();
 
     if (ws.count() > 0) {
-      char jsonBuf[128];
+      char jsonBuf[160];
       snprintf(jsonBuf, sizeof(jsonBuf), 
-               "{\"temp\":%.1f,\"hum\":%.1f,\"moisture\":%d}", 
-               currentTemp, currentHumidity, currentMoisturePercent);
+               "{\"temp\":%.1f,\"hum\":%.1f,\"moisture\":%d,\"motion\":%s}", 
+               currentTemp, 
+               currentHumidity, 
+               currentMoisturePercent, 
+               motionDetected ? "true" : "false");
       
       ws.textAll(jsonBuf);
     }
