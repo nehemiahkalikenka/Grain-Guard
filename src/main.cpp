@@ -8,12 +8,11 @@
 #include "CommPrefs.h"
 #include "Messenger.h"
 
-
-
 // ============= GLOBALS =============
 
 SIM800LDriver gsm;
 bool gsmAvailable = false;
+extern bool sdAvailable;
 
 // --- Sensor state ---
 float currentTemp            = 0.0f;
@@ -53,11 +52,8 @@ const int MAX_ALERTS = 30;
 Alert alertLog[MAX_ALERTS];
 int   alertCount = 0;
 
-float batteryVoltage;
-int   batteryPercent;
-
-// --- Hardware flags ---
-
+float batteryVoltage = 0.0f;
+int   batteryPercent = 0;
 
 // ============= PROTOTYPES =============
 void lcdMenuSetup();
@@ -74,8 +70,7 @@ int   rollingAvgI(int*   buf, int n);
 void updateBuzzer();
 void triggerBuzzer();
 void handleIncomingSMS();
-
-
+void logAlert(const char* level, const char* msg);
 
 // ============= SETUP =============
 void setup() {
@@ -86,11 +81,10 @@ void setup() {
     Serial.println(F("========================================\n"));
 
     sensorsSetup();
+    dht.begin();
 
     // Initialize LCD menu
     lcdMenuSetup();
-    
-  
 
     // Pre-fill smoothing buffers with one real reading so averages
     // are valid immediately rather than starting at zero.
@@ -103,25 +97,23 @@ void setup() {
         moistBuf[i] = m;
     }
 
-dht.begin();
-setupRTC();
-setupSDCard();
-setupWiFi();
-// In setup() after setupWiFi():
-Serial.print("Current IP: ");
-Serial.println(WiFi.localIP());
+    setupRTC();
+    setupSDCard();
+    setupWiFi();
 
+    Serial.print(F("Current IP: "));
+    Serial.println(WiFi.localIP());
 
-bootMillis = millis();
+    bootMillis = millis();
 
-Serial.println(F("PIR warm-up (10 s)..."));
-delay(10000);
-Serial.println(F("All sensors ready."));
-logAlert("INFO", "System started");
+    Serial.println(F("PIR warm-up (10 s)..."));
+    delay(10000);
+    Serial.println(F("All sensors ready."));
+    logAlert("INFO", "System started");
 
-commPrefs.load();
-gsmAvailable = gsm.init();
-if (!gsmAvailable) Serial.println(F("[GSM] Unavailable — SMS disabled."));
+    commPrefs.load();
+    gsmAvailable = gsm.init();
+    if (!gsmAvailable) Serial.println(F("[GSM] Unavailable — SMS disabled."));
 }
 
 // ============= LOOP =============
@@ -135,8 +127,8 @@ void loop() {
     static unsigned long lastBroadcast = 0;
     if (millis() - lastBroadcast >= 1000) {
         lastBroadcast = millis();
-        broadcastSensorData();   // ← add this
-        ws.cleanupClients();     // ← add this — frees disconnected slots
+        broadcastSensorData();
+        ws.cleanupClients(); // Frees disconnected slots
     }
     
     readSensors();
@@ -157,10 +149,8 @@ void loop() {
         lastSDLog = now;
     }
 
-
     if (gsmAvailable) handleIncomingSMS();
 }
-
 
 // ============= SENSOR READING =============
 void readSensors() {
@@ -176,18 +166,12 @@ void readSensors() {
     currentHumidity    = rollingAvgF(humBuf,   SMOOTH);
     currentMoistureRaw = rollingAvgI(moistBuf, SMOOTH);
 
-    // ── Paper formula (Figure 6) ──────────────────────────────────────────
-    // Step 1: apply calibration correction factor from regression
+    // Calibration correction factor & formula
     float corrected = currentMoistureRaw / MOISTURE_CALIBRATION_FACTOR;
-
-    // Step 2: convert to moisture percent
-    // moisture% = 100 - (corrected / ADC_DRY * 100)
-    // At dry (ADC = ADC_DRY): 100 - (ADC_DRY/ADC_DRY * 100) = 0%  ✓
-    // At wet (ADC → 0):       100 - (0/ADC_DRY * 100)        = 100% ✓
     float moistureF = 100.0f - ((corrected / ADC_DRY) * 100.0f);
     currentMoisturePercent = (int)constrain(moistureF, 0.0f, 100.0f);
 
-    // PIR edge detection (unchanged)
+    // PIR edge detection
     int pir = digitalRead(PIN_PIR);
     if (pir == HIGH && !motionDetected) {
         motionDetected = true;
@@ -204,6 +188,7 @@ float rollingAvgF(float* buf, int n) {
     for (int i = 0; i < n; i++) s += buf[i];
     return s / n;
 }
+
 int rollingAvgI(int* buf, int n) {
     long s = 0;
     for (int i = 0; i < n; i++) s += buf[i];
@@ -211,9 +196,7 @@ int rollingAvgI(int* buf, int n) {
 }
 
 // ============= ALERT LOGIC =============
-
-    void checkAlerts() {
-
+void checkAlerts() {
     if (millis() < 15000) return;
 
     unsigned long now = millis();
@@ -222,16 +205,16 @@ int rollingAvgI(int* buf, int n) {
         char msg[48];
         snprintf(msg, sizeof(msg), "Temp %.1f C exceeds %.0f C",
                  currentTemp, TEMP_THRESHOLD);
-        sendAlert(msg);
+        logAlert("WARN", msg); // Replaced sendAlert with logAlert
         lastTempAlert = now;
-        triggerBuzzer();              // ← non-blocking trigger, not activateBuzzer()
+        triggerBuzzer();
     }
 
     if (currentHumidity > HUMIDITY_THRESHOLD && (now - lastHumidityAlert) > ALERT_COOLDOWN) {
         char msg[48];
         snprintf(msg, sizeof(msg), "Humidity %.1f%% exceeds %.0f%%",
                  currentHumidity, HUMIDITY_THRESHOLD);
-        sendAlert(msg);
+        logAlert("WARN", msg);
         lastHumidityAlert = now;
         triggerBuzzer();
     }
@@ -240,7 +223,7 @@ int rollingAvgI(int* buf, int n) {
         char msg[48];
         snprintf(msg, sizeof(msg), "Grain moisture %d%% — spoilage risk!",
                  currentMoisturePercent);
-        sendAlert(msg);
+        logAlert("CRIT", msg);
         lastMoistureAlert = now;
         triggerBuzzer();
     }
@@ -248,7 +231,7 @@ int rollingAvgI(int* buf, int n) {
     if (motionDetected) {
         static unsigned long lastDeterrentMs = 0;
         if (now - lastDeterrentMs > 3000UL) {
-            triggerBuzzer();          // ← non-blocking
+            triggerBuzzer();
             lastDeterrentMs = now;
         }
 
@@ -256,13 +239,13 @@ int rollingAvgI(int* buf, int n) {
             char msg[48];
             snprintf(msg, sizeof(msg), "Security: motion >%ds detected",
                      PIR_TRIGGER_SEC);
-            sendAlert(msg);
+            logAlert("WARN", msg);
             pirAlertSent = true;
         }
     }
 }
 
-// ─── Replace your existing BuzzerState struct and all buzzer code ──────────
+// ============= BUZZER SYSTEM =============
 #define BUZZER_CHANNEL 0
 
 struct BuzzerState {
@@ -270,7 +253,7 @@ struct BuzzerState {
     uint8_t       beepsDone = 0;
     uint8_t       groups    = 0;
     bool          toneOn    = false;
-    bool          inGap     = false;   // ← was missing from your struct
+    bool          inGap     = false;
     unsigned long lastMs    = 0;
 };
 BuzzerState buz;
@@ -327,17 +310,13 @@ void updateBuzzer() {
     }
 }
 
-
-
 // ============= ALERT LOG =============
 void logAlert(const char* level, const char* msg) {
     String ts = getFormattedDateTime();
 
-    // Serial
     Serial.print('['); Serial.print(level); Serial.print("] ");
     Serial.print(ts); Serial.print(" — "); Serial.println(msg);
 
-    // Circular buffer — shift left and overwrite slot [MAX_ALERTS-1] when full
     int idx;
     if (alertCount < MAX_ALERTS) {
         idx = alertCount++;
@@ -347,14 +326,13 @@ void logAlert(const char* level, const char* msg) {
     }
     strncpy(alertLog[idx].level, level, sizeof(alertLog[idx].level) - 1);
     alertLog[idx].level[sizeof(alertLog[idx].level) - 1] = '\0';
-    strncpy(alertLog[idx].ts,  ts.c_str(), sizeof(alertLog[idx].ts)  - 1);
+    strncpy(alertLog[idx].ts, ts.c_str(), sizeof(alertLog[idx].ts) - 1);
     alertLog[idx].ts[sizeof(alertLog[idx].ts) - 1] = '\0';
-    strncpy(alertLog[idx].msg, msg,        sizeof(alertLog[idx].msg) - 1);
+    strncpy(alertLog[idx].msg, msg, sizeof(alertLog[idx].msg) - 1);
     alertLog[idx].msg[sizeof(alertLog[idx].msg) - 1] = '\0';
 
     totalAlerts++;
 
-    // SD
     char line[128];
     snprintf(line, sizeof(line), "[%s] %s %s", level, ts.c_str(), msg);
     logToSD(line);
@@ -372,101 +350,85 @@ String getFormattedDateTime() {
 }
 
 void handleIncomingSMS() {
-  IncomingSMS sms = gsm.checkIncoming();
-  if (sms.command == GSMCommand::NONE) return;
+    IncomingSMS sms = gsm.checkIncoming();
+    if (sms.command == GSMCommand::NONE) return;
 
-  switch (sms.command) {
+    switch (sms.command) {
+        case GSMCommand::STATUS: {
+            char msg[160];
+            const char* level =
+                currentMoisturePercent > MOISTURE_CRITICAL ? "DANGER"  :
+                currentMoisturePercent > MOISTURE_WARNING  ? "WARNING" : "SAFE";
+            snprintf(msg, sizeof(msg),
+                "%s | M:%d%% T:%.1fC H:%.1f%%",
+                level, currentMoisturePercent, currentTemp, currentHumidity);
+            gsm.sendSMSTo(sms.sender, msg);
+            break;
+        }
 
-    // ── STATUS ────────────────────────────────────────────────────────────
-    case GSMCommand::STATUS: {
-      char msg[160];
-      const char* level =
-        currentMoisturePercent > MOISTURE_CRITICAL ? "DANGER"  :
-        currentMoisturePercent > MOISTURE_WARNING  ? "WARNING" : "SAFE";
-      snprintf(msg, sizeof(msg),
-        "%s | M:%d%% T:%.1fC H:%.1f%%",
-        level,
-        currentMoisturePercent,
-        currentTemp,
-        currentHumidity);
-      gsm.sendSMSTo(sms.sender, msg);
-      break;
+        case GSMCommand::LOG: {
+            if (!sdAvailable) {
+                gsm.sendSMSTo(sms.sender, "LOG error: SD card not mounted.");
+                break;
+            }
+            File f = SD.open("/datalog.txt", FILE_READ);
+            if (!f) {
+                gsm.sendSMSTo(sms.sender, "Log file not found.");
+                break;
+            }
+            size_t sz = f.size();
+            if (sz > 155) f.seek(sz - 155);
+            char buf[160] = {0};
+            f.readBytes(buf, 155);
+            f.close();
+
+            char* nl = strchr(buf, '\n');
+            gsm.sendSMSTo(sms.sender, nl ? nl + 1 : buf);
+            break;
+        }
+
+        case GSMCommand::BATTERY: {
+            char msg[160];
+            snprintf(msg, sizeof(msg),
+                "Battery: %.2fV %d%% %s",
+                batteryVoltage,
+                batteryPercent,
+                batteryPercent <= 10 ? "CRITICAL" :
+                batteryPercent <= 30 ? "LOW"      : "OK");
+            gsm.sendSMSTo(sms.sender, msg);
+            break;
+        }
+
+        case GSMCommand::HELP: {
+            gsm.sendSMSTo(sms.sender,
+                "Commands: STATUS, LOG, BATTERY, HELP, SET YYYY-MM-DD HH:MM:SS");
+            break;
+        }
+
+        case GSMCommand::SET: {
+            const char* dtStr = sms.raw + 4;
+            uint16_t yr; uint8_t mo, dy, hr, mn, sc;
+            int parsed = sscanf(dtStr, "%hu-%hhu-%hhu %hhu:%hhu:%hhu",
+                                &yr, &mo, &dy, &hr, &mn, &sc);
+            if (parsed == 6 && yr >= 2024) {
+                Rtc.SetIsWriteProtected(false);
+                Rtc.SetDateTime(RtcDateTime(yr, mo, dy, hr, mn, sc));
+                char reply[80];
+                snprintf(reply, sizeof(reply),
+                    "RTC set: %04d-%02d-%02d %02d:%02d:%02d",
+                    yr, mo, dy, hr, mn, sc);
+                gsm.sendSMSTo(sms.sender, reply);
+            } else {
+                gsm.sendSMSTo(sms.sender,
+                    "SET failed. Use: SET YYYY-MM-DD HH:MM:SS");
+            }
+            break;
+        }
+
+        default: {
+            gsm.sendSMSTo(sms.sender,
+                "Unknown command. Send HELP for list.");
+            break;
+        }
     }
-
-    // ── LOG ───────────────────────────────────────────────────────────────
-    case GSMCommand::LOG: {
-      if (!sdAvailable) {
-        gsm.sendSMSTo(sms.sender, "LOG error: SD card not mounted.");
-        break;
-      }
-      File f = SD.open("/datalog.txt", FILE_READ);
-      if (!f) {
-        gsm.sendSMSTo(sms.sender, "Log file not found.");
-        break;
-      }
-      // Read last 155 chars — fits in one SMS
-      size_t sz = f.size();
-      if (sz > 155) f.seek(sz - 155);
-      char buf[160] = {0};
-      f.readBytes(buf, 155);
-      f.close();
-      // Skip partial first line after seek
-      char* nl = strchr(buf, '\n');
-      gsm.sendSMSTo(sms.sender, nl ? nl + 1 : buf);
-      break;
-    }
-
-    // ── BATTERY ───────────────────────────────────────────────────────────
-    case GSMCommand::BATTERY: {
-      char msg[160];
-      snprintf(msg, sizeof(msg),
-        "Battery: %.2fV  %.0f%%  %s",
-        batteryVoltage,
-        batteryPercent,
-        batteryPercent <= 10 ? "CRITICAL" :
-        batteryPercent <= 30 ? "LOW"      : "OK");
-      gsm.sendSMSTo(sms.sender, msg);
-      break;
-    }
-
-    // ── HELP ──────────────────────────────────────────────────────────────
-    case GSMCommand::HELP: {
-      gsm.sendSMSTo(sms.sender,
-        "Commands: STATUS, LOG, BATTERY, HELP, "
-        "SET YYYY-MM-DD HH:MM:SS");
-      break;
-    }
-
-    // ── SET ───────────────────────────────────────────────────────────────
-    case GSMCommand::SET: {
-      // sms.raw = "SET 2025-06-15 08:30:00" — skip past "SET "
-      const char* dtStr = sms.raw + 4;
-      uint16_t yr; uint8_t mo, dy, hr, mn, sc;
-      int parsed = sscanf(dtStr, "%hu-%hhu-%hhu %hhu:%hhu:%hhu",
-                          &yr, &mo, &dy, &hr, &mn, &sc);
-      if (parsed == 6 && yr >= 2024) {
-        Rtc.SetIsWriteProtected(false);
-        Rtc.SetDateTime(RtcDateTime(yr, mo, dy, hr, mn, sc));
-        char reply[80];
-        snprintf(reply, sizeof(reply),
-          "RTC set: %04d-%02d-%02d %02d:%02d:%02d",
-          yr, mo, dy, hr, mn, sc);
-        gsm.sendSMSTo(sms.sender, reply);
-      } else {
-        gsm.sendSMSTo(sms.sender,
-          "SET failed. Use: SET YYYY-MM-DD HH:MM:SS");
-      }
-      break;
-    }
-
-    // ── UNKNOWN ───────────────────────────────────────────────────────────
-    default: {
-      gsm.sendSMSTo(sms.sender,
-        "Unknown command. Send HELP for list.");
-      break;
-    }
-  }
 }
-
-
-
